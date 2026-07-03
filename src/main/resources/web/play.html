@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Chess</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+  /* Board edge: as wide as the screen allows, or whatever height remains
+     after the header/status/footer chrome (~150px) — no fixed cap. */
+  :root { --bw: min(96vw, calc(100vh - 150px)); }
+  @supports (height: 100dvh) { :root { --bw: min(96vw, calc(100dvh - 150px)); } }
+  body {
+    font-family: system-ui, sans-serif; background: #1e1c1a; color: #eee;
+    min-height: 100vh; display: flex; flex-direction: column; align-items: center;
+  }
+  header, footer { width: var(--bw); max-width: 100%; padding: 10px 4px; }
+  header { display: flex; justify-content: space-between; align-items: center; }
+  #you { font-weight: 700; }
+  #opp { font-size: 14px; color: #aaa; }
+  #opp.on::before  { content: "● "; color: #4caf50; }
+  #opp.off::before { content: "● "; color: #e05555; }
+  #status { width: var(--bw); max-width: 100%; padding: 4px 4px 10px; font-weight: 600; min-height: 34px; }
+  #status.mine { color: #8fd18f; }
+  #board {
+    width: var(--bw); max-width: 100%; aspect-ratio: 1;
+    display: grid; grid-template: repeat(8, 1fr) / repeat(8, 1fr);
+    touch-action: manipulation; user-select: none; -webkit-user-select: none;
+  }
+  .sq { position: relative; display: flex; align-items: center; justify-content: center;
+        font-size: calc(var(--bw) / 8 * 0.75); line-height: 1; }
+  .sq.light { background: #f0d9b5; }
+  .sq.dark  { background: #b58863; }
+  .sq.last::before { content: ""; position: absolute; inset: 0; background: rgba(255, 213, 0, .35); }
+  .sq.sel { outline: 3px solid #5a9948; outline-offset: -3px; }
+  .sq.dot::after {
+    content: ""; position: absolute; width: 27%; height: 27%; border-radius: 50%;
+    background: rgba(25, 80, 25, .45);
+  }
+  .sq.cap::after {
+    content: ""; position: absolute; inset: 5%; border-radius: 50%;
+    border: 4px solid rgba(25, 80, 25, .5);
+  }
+  .piece { position: relative; z-index: 1; }
+  .piece.w { color: #fafafa; text-shadow: 0 0 2px #000, 0 1px 2px rgba(0,0,0,.6); }
+  .piece.b { color: #1c1c1c; text-shadow: 0 0 2px rgba(255,255,255,.45); }
+  footer { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+  #score { font-size: 15px; }
+  button {
+    font: inherit; padding: 8px 14px; border: 0; border-radius: 8px;
+    background: #3a3a3a; color: #eee;
+  }
+  button:active { background: #555; }
+  #rematch { background: #2f6b2f; }
+  #overlay {
+    position: fixed; inset: 0; background: rgba(0, 0, 0, .75); display: none;
+    flex-direction: column; align-items: center; justify-content: center;
+    text-align: center; padding: 20px; gap: 16px; z-index: 10;
+  }
+  #overlay.show { display: flex; }
+  #overlayMsg { font-size: 18px; max-width: 22em; }
+  #promo { display: none; gap: 12px; }
+  #promo.show { display: flex; }
+  #promo button { font-size: 44px; padding: 4px 14px; background: #f0d9b5; color: #1c1c1c; }
+  #toast {
+    position: fixed; bottom: 76px; left: 50%; transform: translateX(-50%);
+    background: #333; padding: 9px 16px; border-radius: 8px; opacity: 0;
+    transition: opacity .2s; pointer-events: none; white-space: nowrap; z-index: 20;
+  }
+  #toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+<header>
+  <span id="you">…</span>
+  <span id="opp">waiting for opponent</span>
+</header>
+<div id="status">Connecting…</div>
+<div id="board"></div>
+<footer>
+  <span id="score">White 0 · Draws 0 · Black 0</span>
+  <span>
+    <button id="resign" hidden>Resign</button>
+    <button id="rematch" hidden>Rematch</button>
+  </span>
+</footer>
+<div id="overlay">
+  <div id="overlayMsg"></div>
+  <div id="promo">
+    <button data-p="q"></button><button data-p="r"></button>
+    <button data-p="b"></button><button data-p="n"></button>
+  </div>
+</div>
+<div id="toast"></div>
+
+<script>
+"use strict";
+// URL: /join/<gameId>/<color>
+const [, , gameId, myColor] = location.pathname.split("/");
+const GLYPHS = { k: "♚", q: "♛", r: "♜", b: "♝", n: "♞", p: "♟" };
+const TEXT = "\uFE0E"; // force text (non-emoji) presentation
+const $ = id => document.getElementById(id);
+
+let ws = null, st = null, sel = null, fatal = false, pendingPromo = null;
+
+// board cells, built once in display order (flipped for black)
+const cells = [];
+for (let row = 0; row < 8; row++) {
+  for (let col = 0; col < 8; col++) {
+    const sq = myColor === "black" ? row * 8 + (7 - col) : (7 - row) * 8 + col;
+    const div = document.createElement("div");
+    div.className = "sq " + ((((sq >> 3) + (sq & 7)) % 2) ? "light" : "dark");
+    div.addEventListener("click", () => tap(sq));
+    $("board").appendChild(div);
+    cells[sq] = div;
+  }
+}
+$("you").textContent = "You play " + cap(myColor);
+
+// websocket
+function connect() {
+  ws = new WebSocket(`ws://${location.host}/ws/${gameId}/${myColor}`);
+  ws.onopen = () => { if (!fatal && !st) setStatus("Waiting for game state…"); };
+  ws.onmessage = e => {
+    const m = JSON.parse(e.data);
+    if (m.type === "state") { st = m; sel = null; render(); }
+    else if (m.type === "error") toast(m.message);
+    else if (m.type === "rejected") { fatal = true; overlay(m.message); ws.onclose = null; ws.close(); }
+  };
+  ws.onclose = () => {
+    if (fatal) return;
+    overlay("Connection lost — reconnecting…");
+    setTimeout(connect, 1500);
+  };
+}
+connect();
+setInterval(() => { if (ws && ws.readyState === 1) ws.send('{"type":"ping"}'); }, 25000);
+const send = obj => { if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); };
+
+// rendering
+function render() {
+  if (fatal || !st) return;
+  const lastFrom = st.lastMove ? sqOf(st.lastMove.slice(0, 2)) : -1;
+  const lastTo = st.lastMove ? sqOf(st.lastMove.slice(2, 4)) : -1;
+  for (let sq = 0; sq < 64; sq++) {
+    const cell = cells[sq];
+    cell.className = "sq " + ((((sq >> 3) + (sq & 7)) % 2) ? "light" : "dark");
+    if (sq === lastFrom || sq === lastTo) cell.classList.add("last");
+    if (sq === sel) cell.classList.add("sel");
+    const ch = st.board[sq];
+    cell.innerHTML = ch === "." ? "" :
+      `<span class="piece ${ch === ch.toUpperCase() ? "w" : "b"}">${GLYPHS[ch.toLowerCase()] + TEXT}</span>`;
+  }
+  if (sel !== null) {
+    for (const m of st.legalMoves) {
+      if (m.startsWith(alg(sel))) {
+        const to = sqOf(m.slice(2, 4));
+        cells[to].classList.add(st.board[to] !== "." ? "cap" : "dot");
+      }
+    }
+  }
+
+  const opp = myColor === "white" ? "black" : "white";
+  $("opp").className = st.connected[opp] ? "on" : "off";
+  $("opp").textContent = st.connected[opp] ? "opponent connected"
+    : (st.phase === "waiting" ? "waiting for opponent" : "opponent disconnected");
+  $("score").textContent = `White ${st.score.white} · Draws ${st.score.draws} · Black ${st.score.black}`;
+  $("resign").hidden = st.phase !== "playing";
+  $("rematch").hidden = st.phase !== "over";
+  if (st.phase === "over") {
+    const votes = st.rematchVotes.length;
+    $("rematch").textContent = st.rematchVotes.includes(myColor)
+      ? `Rematch — waiting (${votes}/2)` : `Rematch${votes ? " (1/2)" : ""}`;
+  }
+
+  const mine = st.phase === "playing" && st.turn === myColor;
+  $("status").className = mine ? "mine" : "";
+  if (st.phase === "waiting") setStatus("Waiting for both players to join…");
+  else if (st.phase === "playing") {
+    setStatus((mine ? "Your turn" : "Opponent’s turn")
+      + (st.check ? (st.turn === myColor ? " — you are in check!" : " — check!") : ""));
+  } else setStatus(st.result || "Game over");
+
+  if (!pendingPromo) overlayOff();
+}
+
+function setStatus(text) { $("status").textContent = text; }
+
+// interaction
+function tap(sq) {
+  if (fatal || !st) return;
+  if (st.phase !== "playing") {
+    if (st.phase === "waiting") toast("Waiting for opponent…");
+    return;
+  }
+  if (sel !== null && sel !== sq
+      && st.legalMoves.some(m => m.startsWith(alg(sel) + alg(sq)))) {
+    tryMove(sel, sq);
+    sel = null;
+    render();
+    return;
+  }
+  if (st.turn !== myColor) { toast("Not your turn"); return; }
+  const ch = st.board[sq];
+  const isMine = ch !== "." && (myColor === "white") === (ch === ch.toUpperCase());
+  sel = isMine && sel !== sq ? sq : null;
+  render();
+}
+
+function tryMove(from, to) {
+  const uci = alg(from) + alg(to);
+  if (st.legalMoves.some(m => m.length === 5 && m.startsWith(uci))) {
+    pendingPromo = uci;
+    for (const b of document.querySelectorAll("#promo button")) {
+      b.textContent = GLYPHS[b.dataset.p] + TEXT;
+      b.style.color = myColor === "white" ? "#fff" : "#1c1c1c";
+      b.style.textShadow = myColor === "white" ? "0 0 3px #000" : "none";
+    }
+    overlay("Promote to:");
+    $("promo").className = "show";
+  } else {
+    send({ type: "move", move: uci });
+  }
+}
+
+for (const b of document.querySelectorAll("#promo button")) {
+  b.addEventListener("click", () => {
+    send({ type: "move", move: pendingPromo + b.dataset.p });
+    pendingPromo = null;
+    overlayOff();
+  });
+}
+
+$("resign").addEventListener("click", () => {
+  if (confirm("Resign this game?")) send({ type: "resign" });
+});
+$("rematch").addEventListener("click", () => send({ type: "rematch" }));
+
+// helpers
+function alg(sq) { return "abcdefgh"[sq & 7] + ((sq >> 3) + 1); }
+function sqOf(a) { return (a.charCodeAt(1) - 49) * 8 + (a.charCodeAt(0) - 97); }
+function cap(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
+
+function overlay(msg) {
+  $("overlayMsg").textContent = msg;
+  $("promo").className = "";
+  $("overlay").className = "show";
+}
+function overlayOff() {
+  $("overlay").className = "";
+  $("promo").className = "";
+  pendingPromo = null;
+}
+
+let toastTimer = null;
+function toast(msg) {
+  $("toast").textContent = msg;
+  $("toast").className = "show";
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { $("toast").className = ""; }, 1800);
+}
+</script>
+</body>
+</html>
