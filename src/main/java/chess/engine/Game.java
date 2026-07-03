@@ -29,6 +29,7 @@ public final class Game {
     private GameStatus status = GameStatus.ONGOING;
     private Move lastMove;
     private final Map<String, Integer> repetition = new HashMap<>();
+    private final List<String> history = new ArrayList<>();
 
     public Game() {
         PieceType[] back = {PieceType.ROOK, PieceType.KNIGHT, PieceType.BISHOP, PieceType.QUEEN,
@@ -122,6 +123,11 @@ public final class Game {
         return legalMoves().stream().map(Move::uci).toList();
     }
 
+    /** Every move played so far, in standard algebraic notation (e.g. "Nf3", "O-O", "Qh4#"). */
+    public List<String> moveHistory() {
+        return List.copyOf(history);
+    }
+
     /**
      * Applies a move for the side to move. Throws {@link IllegalStateException}
      * if the game is over, {@link IllegalArgumentException} if the move is illegal.
@@ -134,6 +140,7 @@ public final class Game {
         Piece piece = board[move.from()];
         boolean isPawn = piece.type() == PieceType.PAWN;
         boolean capture = board[move.to()] != null || (isPawn && move.to() == epSquare);
+        String san = san(move); // needs the pre-move position
 
         applyToBoard(board, move, epSquare);
         updateCastlingRights(piece, move);
@@ -145,6 +152,39 @@ public final class Game {
         lastMove = move;
         repetition.merge(positionKey(), 1, Integer::sum);
         updateStatus();
+        history.add(san + (status == GameStatus.CHECKMATE ? "#" : inCheck() ? "+" : ""));
+    }
+
+    /** Standard algebraic notation for a legal move in the current position, without +/#. */
+    private String san(Move m) {
+        Piece p = board[m.from()];
+        if (p.type() == PieceType.KING && Math.abs((m.from() & 7) - (m.to() & 7)) == 2) {
+            return (m.to() & 7) == 6 ? "O-O" : "O-O-O";
+        }
+        String dest = "" + (char) ('a' + (m.to() & 7)) + (char) ('1' + (m.to() >> 3));
+        boolean capture = board[m.to()] != null
+                || (p.type() == PieceType.PAWN && m.to() == epSquare
+                        && (m.from() & 7) != (m.to() & 7));
+        if (p.type() == PieceType.PAWN) {
+            String s = capture ? (char) ('a' + (m.from() & 7)) + "x" + dest : dest;
+            return m.promotion() == null ? s : s + "=" + m.promotion().letter();
+        }
+        // Disambiguate when another piece of the same type can reach the same square.
+        boolean ambiguous = false, sameFile = false, sameRank = false;
+        for (Move other : legalMoves()) {
+            if (other.from() == m.from() || other.to() != m.to()
+                    || board[other.from()].type() != p.type()) continue;
+            ambiguous = true;
+            if ((other.from() & 7) == (m.from() & 7)) sameFile = true;
+            if ((other.from() >> 3) == (m.from() >> 3)) sameRank = true;
+        }
+        StringBuilder s = new StringBuilder().append(p.type().letter());
+        if (ambiguous) {
+            if (!sameFile) s.append((char) ('a' + (m.from() & 7)));
+            else if (!sameRank) s.append((char) ('1' + (m.from() >> 3)));
+            else s.append((char) ('a' + (m.from() & 7))).append((char) ('1' + (m.from() >> 3)));
+        }
+        return s.append(capture ? "x" : "").append(dest).toString();
     }
 
     // -- rules bookkeeping ---------------------------------------------------

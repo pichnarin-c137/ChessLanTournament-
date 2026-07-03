@@ -7,9 +7,9 @@
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
   /* Board edge: as wide as the screen allows, or whatever height remains
-     after the header/status/footer chrome (~150px) — no fixed cap. */
-  :root { --bw: min(96vw, calc(100vh - 150px)); }
-  @supports (height: 100dvh) { :root { --bw: min(96vw, calc(100dvh - 150px)); } }
+     after the header/status/clocks/moves/footer chrome (~190px) — no fixed cap. */
+  :root { --bw: min(96vw, calc(100vh - 190px)); }
+  @supports (height: 100dvh) { :root { --bw: min(96vw, calc(100dvh - 190px)); } }
   body {
     font-family: system-ui, sans-serif; background: #1e1c1a; color: #eee;
     min-height: 100vh; display: flex; flex-direction: column; align-items: center;
@@ -17,9 +17,20 @@
   header, footer { width: var(--bw); max-width: 100%; padding: 10px 4px; }
   header { display: flex; justify-content: space-between; align-items: center; }
   #you { font-weight: 700; }
+  #opphold { display: flex; align-items: center; gap: 10px; }
   #opp { font-size: 14px; color: #aaa; }
   #opp.on::before  { content: "● "; color: #4caf50; }
   #opp.off::before { content: "● "; color: #e05555; }
+  .clock {
+    font-variant-numeric: tabular-nums; font-weight: 700; font-size: 17px;
+    background: #2c2a28; color: #999; padding: 3px 11px; border-radius: 6px;
+  }
+  .clock.run { background: #234023; color: #cfe8cf; }
+  .clock.low { color: #ff7a6e; }
+  #bar { width: var(--bw); max-width: 100%; padding: 8px 4px 2px;
+         display: flex; align-items: center; gap: 10px; min-height: 38px; }
+  #moves { flex: 1; overflow-x: auto; white-space: nowrap; font-size: 14px;
+           color: #c9c4bd; scrollbar-width: none; }
   #status { width: var(--bw); max-width: 100%; padding: 4px 4px 10px; font-weight: 600; min-height: 34px; }
   #status.mine { color: #8fd18f; }
   #board {
@@ -73,10 +84,17 @@
 <body>
 <header>
   <span id="you">…</span>
-  <span id="opp">waiting for opponent</span>
+  <span id="opphold">
+    <span id="opp">waiting for opponent</span>
+    <span id="oppclock" class="clock" hidden></span>
+  </span>
 </header>
 <div id="status">Connecting…</div>
 <div id="board"></div>
+<div id="bar">
+  <span id="myclock" class="clock" hidden></span>
+  <div id="moves"></div>
+</div>
 <footer>
   <span id="score">White 0 · Draws 0 · Black 0</span>
   <span>
@@ -102,6 +120,7 @@ const TEXT = "\uFE0E"; // force text (non-emoji) presentation
 const $ = id => document.getElementById(id);
 
 let ws = null, st = null, sel = null, fatal = false, pendingPromo = null;
+let clock = null; // {white, black, running, at} — ticked locally, resynced by every state msg
 
 // board cells, built once in display order (flipped for black)
 const cells = [];
@@ -123,7 +142,12 @@ function connect() {
   ws.onopen = () => { if (!fatal && !st) setStatus("Waiting for game state…"); };
   ws.onmessage = e => {
     const m = JSON.parse(e.data);
-    if (m.type === "state") { st = m; sel = null; render(); }
+    if (m.type === "state") {
+      st = m; sel = null;
+      clock = m.clock ? { ...m.clock, at: performance.now() } : null;
+      render();
+      renderClocks();
+    }
     else if (m.type === "error") toast(m.message);
     else if (m.type === "rejected") { fatal = true; overlay(m.message); ws.onclose = null; ws.close(); }
   };
@@ -173,6 +197,14 @@ function render() {
       ? `Rematch — waiting (${votes}/2)` : `Rematch${votes ? " (1/2)" : ""}`;
   }
 
+  const parts = [];
+  for (let i = 0; i < st.history.length; i += 2) {
+    parts.push((i / 2 + 1) + ". " + st.history[i]
+      + (st.history[i + 1] ? " " + st.history[i + 1] : ""));
+  }
+  $("moves").textContent = parts.join("  ");
+  $("moves").scrollLeft = $("moves").scrollWidth;
+
   const mine = st.phase === "playing" && st.turn === myColor;
   $("status").className = mine ? "mine" : "";
   if (st.phase === "waiting") setStatus("Waiting for both players to join…");
@@ -185,6 +217,23 @@ function render() {
 }
 
 function setStatus(text) { $("status").textContent = text; }
+
+// clocks: the server is authoritative; between messages the running side ticks locally
+function clockText(ms) {
+  const s = Math.max(0, Math.ceil(ms / 1000)); // ceil: 0:00 only at zero
+  return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
+}
+function renderClocks() {
+  const opp = myColor === "white" ? "black" : "white";
+  for (const [el, color] of [[$("myclock"), myColor], [$("oppclock"), opp]]) {
+    if (!clock) { el.hidden = true; continue; }
+    const ms = clock[color] - (clock.running === color ? performance.now() - clock.at : 0);
+    el.hidden = false;
+    el.textContent = clockText(ms);
+    el.className = "clock" + (clock.running === color ? " run" : "") + (ms < 30000 ? " low" : "");
+  }
+}
+setInterval(renderClocks, 200);
 
 // interaction
 function tap(sq) {

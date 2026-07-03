@@ -141,6 +141,8 @@ class ServerIntegrationTest {
         assertTrue(over.path("result").asText().contains("Checkmate"));
         assertEquals(1, over.path("score").path("black").asInt());
         assertEquals(0, over.path("score").path("white").asInt());
+        assertEquals("[\"f3\",\"e5\",\"g4\",\"Qh4#\"]", over.path("history").toString());
+        assertTrue(over.path("clock").isNull()); // this room is untimed
 
         // Rematch needs both votes; the board resets and the score stays.
         white.send("{\"type\":\"rematch\"}");
@@ -164,5 +166,17 @@ class ServerIntegrationTest {
         Client back = Client.join("black");
         JsonNode rejoined = back.awaitState(m -> m.path("connected").path("black").asBoolean());
         assertNotNull(rejoined);
+
+        // A timed room: White never moves, the flag falls and Black gets the win.
+        room = server.newRoom(state -> { });
+        room.setTimeControl(new TimeControl(400, 0));
+        Client tWhite = Client.join("white");
+        Client tBlack = Client.join("black");
+        JsonNode timed = tWhite.awaitState(m -> "playing".equals(m.path("phase").asText()));
+        assertEquals("white", timed.path("clock").path("running").asText());
+        JsonNode flagged = tBlack.awaitState(m -> "over".equals(m.path("phase").asText()));
+        assertTrue(flagged.path("result").asText().contains("ran out of time"));
+        assertEquals("black", flagged.path("winner").asText());
+        assertEquals(0, flagged.path("clock").path("white").asLong());
     }
 }
