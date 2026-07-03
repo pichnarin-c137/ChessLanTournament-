@@ -15,6 +15,11 @@ public record RoomState(
         String result,
         String lastMove,
         List<String> legalMoves,
+        List<String> history,
+        String timeControl, // label like "10|5", or null when the game is untimed
+        long whiteMillis,
+        long blackMillis,
+        Color clockRunning, // whose clock is ticking, null when stopped
         boolean whiteConnected,
         boolean blackConnected,
         boolean whiteEverConnected,

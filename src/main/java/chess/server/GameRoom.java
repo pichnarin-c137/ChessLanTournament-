@@ -3,6 +3,8 @@ package chess.server;
 import chess.engine.Color;
 import chess.engine.Game;
 import chess.engine.Move;
+import chess.engine.Piece;
+import chess.engine.PieceType;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -13,6 +15,10 @@ import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
 /**
@@ -30,6 +36,14 @@ public final class GameRoom {
 
     private static final ObjectMapper JSON = new ObjectMapper();
 
+    /** Fires flag-fall checks for all rooms; the task re-verifies under the room lock. */
+    private static final ScheduledExecutorService CLOCK =
+            Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "chess-clock");
+                t.setDaemon(true);
+                return t;
+            });
+
     private final String id;
     private final Consumer<RoomState> hostListener;
 
@@ -42,6 +56,12 @@ public final class GameRoom {
     private Color winner;
     private String result;
 
+    private TimeControl nextTimeControl = TimeControl.NONE; // referee's pick, applied at game start
+    private TimeControl timeControl = TimeControl.NONE;     // active for the current game
+    private long whiteMillis, blackMillis;
+    private long turnStartedNanos;
+    private ScheduledFuture<?> flagTask;
+
     public GameRoom(String id, Consumer<RoomState> hostListener) {
         this.id = id;
         this.hostListener = hostListener;
@@ -51,6 +71,13 @@ public final class GameRoom {
         return id;
     }
 
+    /** The referee's time control; applies to games that have not started yet. */
+    public synchronized void setTimeControl(TimeControl tc) {
+        nextTimeControl = tc;
+        if (phase == Phase.WAITING) resetClocks(); // not started: show the new budget right away
+        broadcast();
+    }
+
     /** Claims the seat if it has no live connection; broadcasts on success. */
     public synchronized boolean tryConnect(Color color, WsContext ctx) {
         if (seats.get(color) != null) return false;
@@ -58,6 +85,8 @@ public final class GameRoom {
         everConnected.add(color);
         if (phase == Phase.WAITING && seats.size() == 2 && result == null) {
             phase = Phase.PLAYING; // game begins once both sides are connected
+            resetClocks();
+            startTurnTimer();
         }
         broadcast();
         return true;
@@ -108,7 +137,20 @@ public final class GameRoom {
             sendError(ctx, "Illegal move.");
             return;
         }
-        if (game.status().isOver()) finishFromEngine();
+        if (timeControl.timed()) {
+            long elapsed = (System.nanoTime() - turnStartedNanos) / 1_000_000;
+            if (color == Color.WHITE) {
+                whiteMillis = Math.max(0, whiteMillis - elapsed) + timeControl.incMillis();
+            } else {
+                blackMillis = Math.max(0, blackMillis - elapsed) + timeControl.incMillis();
+            }
+        }
+        if (game.status().isOver()) {
+            cancelFlagCheck();
+            finishFromEngine();
+        } else {
+            startTurnTimer(); // the opponent's clock starts now
+        }
         broadcast();
     }
 
@@ -117,6 +159,7 @@ public final class GameRoom {
             sendError(ctx, "No game in progress.");
             return;
         }
+        cancelFlagCheck();
         phase = Phase.OVER;
         winner = color.opposite();
         result = name(color) + " resigned — " + name(winner) + " wins";
@@ -135,9 +178,70 @@ public final class GameRoom {
             winner = null;
             result = null;
             rematchVotes.clear();
+            resetClocks();
             phase = seats.size() == 2 ? Phase.PLAYING : Phase.WAITING;
+            if (phase == Phase.PLAYING) startTurnTimer();
         }
         broadcast();
+    }
+
+    // -- clocks ------------------------------------------------------------------
+
+    /** Applies the referee's time control and refills both clocks. */
+    private void resetClocks() {
+        timeControl = nextTimeControl;
+        whiteMillis = blackMillis = timeControl.baseMillis();
+    }
+
+    /** (Re)starts the clock of the side to move and schedules its flag-fall check. */
+    private void startTurnTimer() {
+        turnStartedNanos = System.nanoTime();
+        cancelFlagCheck();
+        if (timeControl.timed()) {
+            long remaining = game.turn() == Color.WHITE ? whiteMillis : blackMillis;
+            flagTask = CLOCK.schedule(this::flagFall, remaining + 50, TimeUnit.MILLISECONDS);
+        }
+    }
+
+    private void cancelFlagCheck() {
+        if (flagTask != null) flagTask.cancel(false);
+        flagTask = null;
+    }
+
+    /** How much time a side has left right now (the running clock is deducted live). */
+    private long remainingMillis(Color side) {
+        long millis = side == Color.WHITE ? whiteMillis : blackMillis;
+        if (phase == Phase.PLAYING && timeControl.timed() && game.turn() == side) {
+            millis -= (System.nanoTime() - turnStartedNanos) / 1_000_000;
+        }
+        return Math.max(0, millis);
+    }
+
+    private synchronized void flagFall() {
+        if (phase != Phase.PLAYING || remainingMillis(game.turn()) > 0) return; // move arrived in time
+        Color flagged = game.turn();
+        if (flagged == Color.WHITE) whiteMillis = 0;
+        else blackMillis = 0;
+        cancelFlagCheck();
+        phase = Phase.OVER;
+        if (bareKing(flagged.opposite())) { // opponent can't mate: draw (simplified FIDE rule)
+            result = name(flagged) + " ran out of time — draw ("
+                    + name(flagged.opposite()) + " cannot mate)";
+            draws++;
+        } else {
+            winner = flagged.opposite();
+            result = name(flagged) + " ran out of time — " + name(winner) + " wins";
+            addPoint(winner);
+        }
+        broadcast();
+    }
+
+    private boolean bareKing(Color side) {
+        for (int sq = 0; sq < 64; sq++) {
+            Piece p = game.pieceAt(sq);
+            if (p != null && p.color() == side && p.type() != PieceType.KING) return false;
+        }
+        return true;
     }
 
     private void finishFromEngine() {
@@ -175,6 +279,8 @@ public final class GameRoom {
 
     /** Sends a final message to both players and drops the seats (host started a new game). */
     public synchronized void close(String message) {
+        cancelFlagCheck();
+        phase = Phase.OVER; // a queued flag-fall must not fire for a discarded room
         for (WsContext ctx : seats.values()) {
             send(ctx, rejectedJson(message));
             try {
@@ -195,6 +301,11 @@ public final class GameRoom {
                 result,
                 game.lastMove() == null ? null : game.lastMove().uci(),
                 phase == Phase.PLAYING ? game.legalMovesUci() : List.of(),
+                game.moveHistory(),
+                timeControl.timed() ? timeControl.label() : null,
+                remainingMillis(Color.WHITE),
+                remainingMillis(Color.BLACK),
+                phase == Phase.PLAYING && timeControl.timed() ? game.turn() : null,
                 seats.containsKey(Color.WHITE),
                 seats.containsKey(Color.BLACK),
                 everConnected.contains(Color.WHITE),
@@ -225,6 +336,17 @@ public final class GameRoom {
         n.put("lastMove", s.lastMove());
         ArrayNode moves = n.putArray("legalMoves");
         s.legalMoves().forEach(moves::add);
+        ArrayNode history = n.putArray("history");
+        s.history().forEach(history::add);
+        if (s.timeControl() == null) {
+            n.putNull("clock");
+        } else {
+            ObjectNode clock = n.putObject("clock");
+            clock.put("control", s.timeControl());
+            clock.put("white", s.whiteMillis());
+            clock.put("black", s.blackMillis());
+            clock.put("running", s.clockRunning() == null ? null : name(s.clockRunning()).toLowerCase());
+        }
         ObjectNode connected = n.putObject("connected");
         connected.put("white", s.whiteConnected());
         connected.put("black", s.blackConnected());

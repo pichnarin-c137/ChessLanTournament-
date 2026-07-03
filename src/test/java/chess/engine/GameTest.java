@@ -2,6 +2,8 @@ package chess.engine;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -190,5 +192,48 @@ class GameTest {
         g.setHalfmoveClock(99);
         g.makeMove(Move.fromUci("a1a2")); // quiet rook move: clock reaches 100
         assertEquals(GameStatus.DRAW_FIFTY_MOVES, g.status());
+    }
+
+    //  move history (SAN)
+
+    @Test
+    void sanRecordsPawnPieceAndCastlingMoves() {
+        Game g = play("g1f3", "g8f6", "g2g3", "g7g6", "f1g2", "f8g7", "e1g1", "e8g8");
+        assertEquals(List.of("Nf3", "Nf6", "g3", "g6", "Bg2", "Bg7", "O-O", "O-O"),
+                g.moveHistory());
+    }
+
+    @Test
+    void sanFoolsMateEndsWithMateSign() {
+        Game g = play("f2f3", "e7e5", "g2g4", "d8h4");
+        assertEquals(List.of("f3", "e5", "g4", "Qh4#"), g.moveHistory());
+    }
+
+    @Test
+    void sanEnPassantIsAFileCapture() {
+        Game g = play("e2e4", "a7a6", "e4e5", "d7d5", "e5d6");
+        assertEquals(List.of("e4", "a6", "e5", "d5", "exd6"), g.moveHistory());
+    }
+
+    @Test
+    void sanPromotionWithCheck() {
+        Game g = Game.fromPosition(board("a7=P", "e1=K", "e8=k"), Color.WHITE, "-", -1);
+        g.makeMove(Move.fromUci("a7a8q")); // the new queen checks along the 8th rank
+        assertEquals(List.of("a8=Q+"), g.moveHistory());
+    }
+
+    @Test
+    void sanCaptureWithCheck() {
+        Game g = Game.fromPosition(board("e1=K", "d1=Q", "d8=q", "h8=k"), Color.WHITE, "-", -1);
+        g.makeMove(Move.fromUci("d1d8"));
+        assertEquals(List.of("Qxd8+"), g.moveHistory());
+    }
+
+    @Test
+    void sanDisambiguatesByFile() {
+        // Both rooks can reach e1, so the a-rook's move must say which one it is.
+        Game g = Game.fromPosition(board("a2=K", "a1=R", "h1=R", "b8=k"), Color.WHITE, "-", -1);
+        g.makeMove(Move.fromUci("a1e1"));
+        assertEquals(List.of("Rae1"), g.moveHistory());
     }
 }
