@@ -24,6 +24,8 @@ public record RoomState(
         boolean blackConnected,
         boolean whiteEverConnected,
         boolean blackEverConnected,
+        String whiteBot, // bot level ("easy"/"medium"/"hard"), or null for a human seat
+        String blackBot,
         int whiteWins,
         int blackWins,
         int draws,

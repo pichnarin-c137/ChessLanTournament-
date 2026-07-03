@@ -1,5 +1,6 @@
 package chess.server;
 
+import chess.engine.Bot;
 import chess.engine.Color;
 import chess.engine.Game;
 import chess.engine.Move;
@@ -14,6 +15,7 @@ import java.util.EnumMap;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -44,12 +46,22 @@ public final class GameRoom {
                 return t;
             });
 
+    /** Runs bot searches for all rooms, off the clock thread so flag checks never wait. */
+    private static final ScheduledExecutorService BOT =
+            Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "chess-bot");
+                t.setDaemon(true);
+                return t;
+            });
+
     private final String id;
     private final Consumer<RoomState> hostListener;
 
     private Game game = new Game();
     private Phase phase = Phase.WAITING;
     private final Map<Color, WsContext> seats = new EnumMap<>(Color.class);
+    private final Map<Color, Bot.Level> bots = new EnumMap<>(Color.class);
+    private final Random rnd = new Random();
     private final Set<Color> everConnected = EnumSet.noneOf(Color.class);
     private final Set<Color> rematchVotes = EnumSet.noneOf(Color.class);
     private int whiteWins, blackWins, draws;
@@ -78,18 +90,33 @@ public final class GameRoom {
         broadcast();
     }
 
+    /** Seats the built-in bot; the referee calls this right after creating the room. */
+    public synchronized void setBot(Color color, Bot.Level level) {
+        bots.put(color, level);
+        everConnected.add(color);
+        maybeStart(); // both seats can be bots: the game starts with no one joining
+        broadcast();
+        maybeScheduleBot();
+    }
+
     /** Claims the seat if it has no live connection; broadcasts on success. */
     public synchronized boolean tryConnect(Color color, WsContext ctx) {
-        if (seats.get(color) != null) return false;
+        if (seats.get(color) != null || bots.containsKey(color)) return false;
         seats.put(color, ctx);
         everConnected.add(color);
-        if (phase == Phase.WAITING && seats.size() == 2 && result == null) {
-            phase = Phase.PLAYING; // game begins once both sides are connected
+        maybeStart();
+        broadcast();
+        maybeScheduleBot();
+        return true;
+    }
+
+    /** The game begins once every seat is filled, by a connection or a bot. */
+    private void maybeStart() {
+        if (phase == Phase.WAITING && seats.size() + bots.size() == 2 && result == null) {
+            phase = Phase.PLAYING;
             resetClocks();
             startTurnTimer();
         }
-        broadcast();
-        return true;
     }
 
     public synchronized void disconnect(Color color, WsContext ctx) {
@@ -137,9 +164,14 @@ public final class GameRoom {
             sendError(ctx, "Illegal move.");
             return;
         }
+        afterMove(color);
+    }
+
+    /** Post-move bookkeeping shared by human and bot moves. */
+    private void afterMove(Color mover) {
         if (timeControl.timed()) {
             long elapsed = (System.nanoTime() - turnStartedNanos) / 1_000_000;
-            if (color == Color.WHITE) {
+            if (mover == Color.WHITE) {
                 whiteMillis = Math.max(0, whiteMillis - elapsed) + timeControl.incMillis();
             } else {
                 blackMillis = Math.max(0, blackMillis - elapsed) + timeControl.incMillis();
@@ -152,6 +184,7 @@ public final class GameRoom {
             startTurnTimer(); // the opponent's clock starts now
         }
         broadcast();
+        maybeScheduleBot();
     }
 
     private void handleResign(Color color, WsContext ctx) {
@@ -173,16 +206,47 @@ public final class GameRoom {
             return;
         }
         rematchVotes.add(color);
+        rematchVotes.addAll(bots.keySet()); // the computer is always up for another
         if (rematchVotes.size() == 2) {
             game = new Game();
             winner = null;
             result = null;
             rematchVotes.clear();
             resetClocks();
-            phase = seats.size() == 2 ? Phase.PLAYING : Phase.WAITING;
+            phase = seats.size() + bots.size() == 2 ? Phase.PLAYING : Phase.WAITING;
             if (phase == Phase.PLAYING) startTurnTimer();
         }
         broadcast();
+        maybeScheduleBot();
+    }
+
+    // -- the built-in bot --------------------------------------------------------
+
+    /** If it is a bot's turn, search on the shared bot thread and then move. */
+    private void maybeScheduleBot() {
+        Bot.Level level = bots.get(game.turn());
+        if (phase != Phase.PLAYING || level == null) return;
+        Game position = game.copy();
+        int ply = game.moveHistory().size();
+        long delay = 400 + rnd.nextInt(400); // a beat of "thinking" feels natural
+        BOT.schedule(() -> {
+            try {
+                applyBotMove(Bot.choose(position, level, rnd), ply);
+            } catch (Exception e) {
+                e.printStackTrace(); // a scheduled task would otherwise fail silently
+            }
+        }, delay, TimeUnit.MILLISECONDS);
+    }
+
+    /** Applies a move computed off-thread, unless the game moved on meanwhile. */
+    private synchronized void applyBotMove(Move move, int ply) {
+        if (phase != Phase.PLAYING || game.moveHistory().size() != ply
+                || !bots.containsKey(game.turn())) {
+            return; // resignation, flag fall or a new game while the bot was thinking
+        }
+        Color mover = game.turn();
+        game.makeMove(move);
+        afterMove(mover);
     }
 
     // -- clocks ------------------------------------------------------------------
@@ -306,12 +370,19 @@ public final class GameRoom {
                 remainingMillis(Color.WHITE),
                 remainingMillis(Color.BLACK),
                 phase == Phase.PLAYING && timeControl.timed() ? game.turn() : null,
-                seats.containsKey(Color.WHITE),
-                seats.containsKey(Color.BLACK),
+                seats.containsKey(Color.WHITE) || bots.containsKey(Color.WHITE),
+                seats.containsKey(Color.BLACK) || bots.containsKey(Color.BLACK),
                 everConnected.contains(Color.WHITE),
                 everConnected.contains(Color.BLACK),
+                botLabel(Color.WHITE),
+                botLabel(Color.BLACK),
                 whiteWins, blackWins, draws,
                 EnumSet.copyOf(rematchVotes.isEmpty() ? EnumSet.noneOf(Color.class) : rematchVotes));
+    }
+
+    private String botLabel(Color side) {
+        Bot.Level level = bots.get(side);
+        return level == null ? null : level.name().toLowerCase();
     }
 
     /** Pushes the current state to both players and the host view. */
@@ -350,6 +421,9 @@ public final class GameRoom {
         ObjectNode connected = n.putObject("connected");
         connected.put("white", s.whiteConnected());
         connected.put("black", s.blackConnected());
+        ObjectNode bots = n.putObject("bots");
+        bots.put("white", s.whiteBot());
+        bots.put("black", s.blackBot());
         ObjectNode score = n.putObject("score");
         score.put("white", s.whiteWins());
         score.put("black", s.blackWins());

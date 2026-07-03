@@ -1,5 +1,6 @@
 package chess.ui;
 
+import chess.engine.Bot;
 import chess.engine.Color;
 import chess.server.GameRoom;
 import chess.server.LanIp;
@@ -152,7 +153,9 @@ public class HostApp extends Application {
             if (confirm.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) return;
         }
         newGameButton.setDisable(true);
-        TimeControl tc = timeChoice.getValue(); // read on the FX thread
+        TimeControl tc = timeChoice.getValue(); // read on the FX thread, like the seats
+        Bot.Level whiteBot = whitePanel.chosenBot();
+        Bot.Level blackBot = blackPanel.chosenBot();
         Thread worker = new Thread(() -> {
             try {
                 if (server == null) {
@@ -162,12 +165,16 @@ public class HostApp extends Application {
                 }
                 GameRoom fresh = server.newRoom(state -> Platform.runLater(() -> render(state)));
                 fresh.setTimeControl(tc);
+                if (whiteBot != null) fresh.setBot(Color.WHITE, whiteBot);
+                if (blackBot != null) fresh.setBot(Color.BLACK, blackBot);
                 room = fresh;
                 String base = "http://" + LanIp.detect() + ":" + port;
                 Platform.runLater(() -> {
                     serverLabel.setText(base);
-                    whitePanel.setLink(base + "/join/" + fresh.id() + "/white");
-                    blackPanel.setLink(base + "/join/" + fresh.id() + "/black");
+                    if (whiteBot != null) whitePanel.setBotMode(whiteBot);
+                    else whitePanel.setLink(base + "/join/" + fresh.id() + "/white");
+                    if (blackBot != null) blackPanel.setBotMode(blackBot);
+                    else blackPanel.setLink(base + "/join/" + fresh.id() + "/black");
                 });
             } catch (Exception e) {
                 Platform.runLater(() -> showStartError(e));
@@ -258,16 +265,20 @@ public class HostApp extends Application {
         System.exit(0); // make sure no stray server thread keeps the JVM alive
     }
 
-    /** QR code + join link + connection indicator for one color. */
+    /** QR code + join link + connection indicator for one color, or the bot's seat. */
     private static final class SeatPanel extends VBox {
+        private final ComboBox<String> occupant = new ComboBox<>();
         private final ImageView qr = new ImageView();
         private final TextField link = new TextField();
         private final Label status = new Label("● no game");
+        private boolean botSeat;
 
         SeatPanel(String colorName) {
             super(6);
             Label name = new Label(colorName);
             name.setStyle("-fx-font-weight: bold; -fx-font-size: 14px;");
+            occupant.getItems().addAll("Human", "Bot — easy", "Bot — medium", "Bot — hard");
+            occupant.setValue("Human"); // takes effect at the next New Game
             link.setEditable(false);
             qr.setFitWidth(190);
             qr.setFitHeight(190);
@@ -275,16 +286,41 @@ public class HostApp extends Application {
             setPadding(new Insets(10));
             setStyle("-fx-border-color: #bbb; -fx-border-radius: 6;");
             setAlignment(Pos.CENTER);
-            getChildren().addAll(name, qr, link, status);
+            getChildren().addAll(name, occupant, qr, link, status);
+        }
+
+        /** The picked difficulty, or null when the seat is set to Human. */
+        Bot.Level chosenBot() {
+            return switch (occupant.getValue()) {
+                case "Bot — easy" -> Bot.Level.EASY;
+                case "Bot — medium" -> Bot.Level.MEDIUM;
+                case "Bot — hard" -> Bot.Level.HARD;
+                default -> null;
+            };
         }
 
         void setLink(String url) {
+            showJoinControls(true);
             link.setText(url);
             qr.setImage(Qr.encode(url, 380));
             setStatusStyle("#b58900", "● waiting to join…");
         }
 
+        void setBotMode(Bot.Level level) {
+            showJoinControls(false);
+            setStatusStyle("#2a9d2a", "🤖 computer — " + level.name().toLowerCase());
+        }
+
+        private void showJoinControls(boolean human) {
+            botSeat = !human;
+            qr.setVisible(human);
+            qr.setManaged(human);
+            link.setVisible(human);
+            link.setManaged(human);
+        }
+
         void setStatus(boolean connected, boolean everConnected) {
+            if (botSeat) return; // the bot's label never changes
             if (connected) setStatusStyle("#2a9d2a", "● connected");
             else if (everConnected) setStatusStyle("#cc3333", "● disconnected — same link reconnects");
             else setStatusStyle("#b58900", "● waiting to join…");

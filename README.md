@@ -35,6 +35,21 @@ Pick a **time control** in the toolbar before starting (default 10 min;
 Changing it later applies to the next game to start — the next rematch, or
 immediately while still waiting for players.
 
+### Play against the computer
+
+Each seat panel has a picker: **Human** (the default QR join) or **Bot** at
+easy, medium or hard. Set a seat to a bot and press New Game — its QR code is
+replaced by "🤖 computer", the game starts as soon as the human joins, and the
+bot answers after a short think. It plays under the same clock as everyone
+else (it can lose on time), and it always accepts a rematch, so one tap
+restarts the game. Set *both* seats to bots and the referee board becomes a
+self-playing demo.
+
+The bot is built in and free: a small negamax search over the app's own rules
+engine — no Stockfish, no downloads, no network. Easy looks one move ahead and
+blunders happily; medium punishes hung pieces; hard searches four plies and
+plays solid casual chess.
+
 ## Build & run the fat jar
 
 ```bash
@@ -62,7 +77,10 @@ Installs "chess-referee" into the application menu (Games).
   **Draw rules included**: stalemate, insufficient material, the 50-move rule
   and threefold repetition are declared automatically. It also records the
   **move history** in standard algebraic notation ("Nf3", "O-O", "Qh4#"),
-  shown live on the referee window and both player screens.
+  shown live on the referee window and both player screens. The built-in
+  **bot** (`chess.engine.Bot`) lives here too: negamax + alpha-beta over
+  position copies, material-and-placement evaluation, difficulty = search
+  depth plus evaluation noise.
 - **`chess.server`** — Javalin (embedded Jetty) serving the one-file web client
   at `/join/<gameId>/<color>` and relaying JSON over `/ws/<gameId>/<color>`.
   One `GameRoom` with two color seats: a taken color rejects further devices;
@@ -96,6 +114,7 @@ mvn test
 ```
 
 Engine unit tests cover the tricky rules (castling legality, en passant,
-promotion, checkmate, stalemate, pins, draws), plus an integration test that
-drives a real WebSocket session end to end (join, reject taken seat, fool's
-mate, rematch, resign, reconnect).
+promotion, checkmate, stalemate, pins, draws) and the bot (finds mate, takes
+hanging pieces, declines poisoned pawns, legal self-play), plus an integration
+test that drives a real WebSocket session end to end (join, reject taken seat,
+fool's mate, rematch, resign, reconnect, flag fall, a game against the bot).

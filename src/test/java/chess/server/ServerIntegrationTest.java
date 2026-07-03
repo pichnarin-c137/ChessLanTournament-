@@ -1,5 +1,7 @@
 package chess.server;
 
+import chess.engine.Bot;
+import chess.engine.Color;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterAll;
@@ -178,5 +180,22 @@ class ServerIntegrationTest {
         assertTrue(flagged.path("result").asText().contains("ran out of time"));
         assertEquals("black", flagged.path("winner").asText());
         assertEquals(0, flagged.path("clock").path("white").asLong());
+
+        // A bot room: the computer seats Black, answers moves and accepts rematches.
+        room = server.newRoom(state -> { });
+        room.setBot(Color.BLACK, Bot.Level.EASY);
+        Client solo = Client.join("white");
+        JsonNode botGame = solo.awaitState(m -> "playing".equals(m.path("phase").asText()));
+        assertEquals("easy", botGame.path("bots").path("black").asText());
+        assertTrue(botGame.path("connected").path("black").asBoolean());
+        solo.send("{\"type\":\"move\",\"move\":\"e2e4\"}");
+        JsonNode replied = solo.awaitState(m -> m.path("history").size() == 2);
+        assertEquals("white", replied.path("turn").asText());
+        solo.send("{\"type\":\"resign\"}");
+        solo.awaitState(m -> "over".equals(m.path("phase").asText()));
+        solo.send("{\"type\":\"rematch\"}"); // the bot votes along, one click restarts
+        JsonNode again = solo.awaitState(m -> "playing".equals(m.path("phase").asText())
+                && m.path("history").size() == 0);
+        assertEquals(1, again.path("score").path("black").asInt());
     }
 }
