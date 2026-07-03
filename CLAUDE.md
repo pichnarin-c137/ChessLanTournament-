@@ -7,14 +7,15 @@ browsers over LAN. All state in memory. See README.md for user-facing docs.
 
 ```bash
 mvn javafx:run -Djavafx.args="--port=8081"   # dev run — ALWAYS use 8081 (see Gotchas)
-mvn test                                     # 29 tests: engine rules + real-WebSocket integration
+mvn test                                     # 34 tests: engine rules, bot, real-WebSocket integration
 mvn clean package                            # fat jar: target/chess-referee-1.0.0-all.jar
 ./package.sh                                 # .deb via jpackage → chess-referee_1.0.0-1_amd64.deb
 ```
 
 ## Architecture
 
-- `chess.engine` — pure rules engine, no UI/network imports. Server is authoritative.
+- `chess.engine` — pure rules engine + `Bot` (negamax search), no UI/network imports.
+  Server is authoritative. `Game.copy()`/`applyUnchecked` exist only for the bot's search.
 - `chess.server` — Javalin HTTP+WS. `GameRoom` = one session, all methods synchronized.
 - `chess.ui` — JavaFX referee window. Server runs off the FX thread; room snapshots
   arrive via `Platform.runLater`.

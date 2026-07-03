@@ -74,6 +74,19 @@ public final class Game {
         return g;
     }
 
+    /** Position-only copy (no history or repetition tracking), for the bot's search. */
+    public Game copy() {
+        Game g = new Game(true);
+        System.arraycopy(board, 0, g.board, 0, 64);
+        g.turn = turn;
+        g.castleWK = castleWK;
+        g.castleWQ = castleWQ;
+        g.castleBK = castleBK;
+        g.castleBQ = castleBQ;
+        g.epSquare = epSquare;
+        return g;
+    }
+
     public Color turn() {
         return turn;
     }
@@ -153,6 +166,20 @@ public final class Game {
         repetition.merge(positionKey(), 1, Integer::sum);
         updateStatus();
         history.add(san + (status == GameStatus.CHECKMATE ? "#" : inCheck() ? "+" : ""));
+    }
+
+    /**
+     * Fast apply for the bot's search: no validation, SAN, status or repetition
+     * bookkeeping. Only call on {@link #copy() search copies} with legal moves.
+     */
+    void applyUnchecked(Move move) {
+        Piece piece = board[move.from()];
+        applyToBoard(board, move, epSquare);
+        updateCastlingRights(piece, move);
+        epSquare = piece.type() == PieceType.PAWN && Math.abs(move.to() - move.from()) == 16
+                ? (move.from() + move.to()) / 2
+                : -1;
+        turn = turn.opposite();
     }
 
     /** Standard algebraic notation for a legal move in the current position, without +/#. */

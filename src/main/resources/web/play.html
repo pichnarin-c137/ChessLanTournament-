@@ -185,9 +185,14 @@ function render() {
   }
 
   const opp = myColor === "white" ? "black" : "white";
-  $("opp").className = st.connected[opp] ? "on" : "off";
-  $("opp").textContent = st.connected[opp] ? "opponent connected"
-    : (st.phase === "waiting" ? "waiting for opponent" : "opponent disconnected");
+  if (st.bots && st.bots[opp]) {
+    $("opp").className = "on";
+    $("opp").textContent = "computer (" + st.bots[opp] + ")";
+  } else {
+    $("opp").className = st.connected[opp] ? "on" : "off";
+    $("opp").textContent = st.connected[opp] ? "opponent connected"
+      : (st.phase === "waiting" ? "waiting for opponent" : "opponent disconnected");
+  }
   $("score").textContent = `White ${st.score.white} · Draws ${st.score.draws} · Black ${st.score.black}`;
   $("resign").hidden = st.phase !== "playing";
   $("rematch").hidden = st.phase !== "over";
