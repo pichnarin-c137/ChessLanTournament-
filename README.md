@@ -1,61 +1,87 @@
-**Prompt:**
+# LAN Chess Referee
 
-Build a **local two-player chess game** where a laptop runs a **JavaFX (Java 17)** app as a **pure host/referee** — it does not play. **Both** players (White and Black) join from their own browser/phone via  **QR code or link** , over the same local network. No database, no persistence — all state in memory, discarded when the app closes. Package the host with  **jpackage** .
+A local two-player chess game. A laptop runs a JavaFX app that acts as a **pure
+host/referee** — it never plays. Both players join from their own phone or
+browser by scanning a QR code, over the same Wi-Fi. The app embeds an HTTP +
+WebSocket server that serves the mobile board and holds the **authoritative
+chess engine**: every move is validated server-side, and every change is pushed
+live to both players and the referee's read-only board.
 
-**Architecture:**
+No database, no files — all state lives in memory and disappears when the app
+closes.
 
-* **Laptop = JavaFX host + referee.** Runs an **embedded HTTP + WebSocket server** (lightweight embedded server, e.g. Javalin or Jetty, inside the JavaFX process). Renders a **live referee/spectator board** and the scoreboard. Does NOT play a side.
-* **Two player clients = browsers.** The server serves a minimal, mobile-friendly HTML/JS chessboard to each. No install for players.
-* **Sync:** all moves relay in real time over WebSocket; the server holds authoritative game state and pushes updates to both players **and** the laptop's referee view.
-* **All state in memory** , gone on app close.
+## Requirements
 
-**Host flow (JavaFX):**
+- **JDK 17** (with `jpackage` for building the installer)
+- **Maven 3.8+**
+- Host laptop and both players on the **same Wi-Fi / LAN** — this is by design;
+  nothing is exposed to the internet. If the LAN blocks client-to-client
+  traffic (guest networks often do) or a firewall blocks the port, players
+  can't join. Allow inbound TCP on the chosen port (default **8080**).
 
-1. Launch → "New Game" → server starts, determine the machine's  **LAN IP** .
-2. Generate **two distinct join URLs** and **two QR codes** (generate QR in-app, e.g. ZXing):
-   * White: `http://<lan-ip>:<port>/join/<gameId>/white`
-   * Black: `http://<lan-ip>:<port>/join/<gameId>/black`
-3. Display both QRs/links side by side, each labeled with its color, with a connection indicator ("White: waiting → connected").
-4. Show the live board (referee view) and scoreboard. Game begins once **both** sides are connected.
+## Run (development)
 
-**Player flow (web):**
+```bash
+mvn javafx:run                                 # default port 8080
+mvn javafx:run -Djavafx.args="--port=8081"     # if 8080 is taken (e.g. Jenkins)
+```
 
-* Scan the White or Black QR → served a clean, responsive chessboard bound to that color → auto-joined on the assigned side. Reject a second attempt to take an already-taken color.
+Click **New Game**: the server starts, and two QR codes appear — one per
+color. Each player scans theirs and plays in the browser. The game starts once
+both are connected.
 
-**Chess engine — FULL rules (server-side, authoritative):**
+## Build & run the fat jar
 
-* All piece moves; **castling** (both sides, all legality conditions),  **en passant** , **pawn promotion** (player picks the piece)
-* **Check** ,  **checkmate** ,  **stalemate** ; reject illegal moves; enforce turn order; prevent moving into check
-* Optional: draw by insufficient material / 50-move / threefold (state if included)
-* Engine is the sole authority — validate every move server-side; never trust the client.
+```bash
+mvn clean package
+java -jar target/chess-referee-1.0.0-all.jar            # default port 8080
+java -jar target/chess-referee-1.0.0-all.jar --port=8081
+```
 
-**Scoreboard (session only, in memory):**
+The shaded jar bundles JavaFX's Linux natives, so it is Linux-x64 specific.
 
-* Track wins/losses/draws for the current session across rematches between the two connected players; reset on app close.
-* Show it on the laptop referee view and on both player screens.
-* On game end (mate/stalemate/resign), offer **Rematch** (optionally swap colors) and update the scoreboard.
+## Package as a .deb
 
-**UI requirements:**
+```bash
+./package.sh       # needs jpackage (JDK 17), fakeroot and dpkg
+sudo apt install ./target/chess-referee_1.0.0-1_amd64.deb
+```
 
-* **JavaFX referee view:** live board reflecting every move, turn indicator, both connection statuses, the two QR/link panels, scoreboard, and a game-over banner. Read-only board (host doesn't move pieces).
-* **Web player board:** minimal, responsive, mobile-friendly; click/tap-to-move (select piece → legal targets highlighted → select destination); promotion picker; turn indicator; scoreboard; "not your turn" feedback.
-* Handle disconnects gracefully (show "White disconnected", allow waiting for reconnect via the same link, or end game).
+Installs "chess-referee" into the application menu (Games).
 
-**Technical requirements:**
+## How it works
 
-* Server/networking off the JavaFX Application Thread; UI updates via `Platform.runLater`.
-* Clean separation: **chess engine** (pure Java, no UI/network deps, unit-testable), **server/session layer** (WebSocket + game room with two color slots),  **JavaFX referee UI** ,  **web client** .
-* Same-LAN only — encode the correct non-loopback IPv4 in both QRs; if multiple interfaces, pick the active one and note the assumption.
-* Clear error if the port is taken; clear handling if someone opens a join link for an already-claimed color.
+- **`chess.engine`** — pure-Java rules engine, no UI/network imports. Full
+  rules: castling (all legality conditions), en passant, promotion with piece
+  choice, check/checkmate/stalemate, turn order, no moving into check.
+  **Draw rules included**: stalemate, insufficient material, the 50-move rule
+  and threefold repetition are declared automatically.
+- **`chess.server`** — Javalin (embedded Jetty) serving the one-file web client
+  at `/join/<gameId>/<color>` and relaying JSON over `/ws/<gameId>/<color>`.
+  One `GameRoom` with two color seats: a taken color rejects further devices;
+  a disconnected player reconnects through the same link/QR. Runs off the
+  JavaFX thread; UI updates arrive via `Platform.runLater`.
+- **`chess.ui`** — the referee window: live read-only board, both QR/link
+  panels with connection indicators, turn/check banner and the session
+  scoreboard. QR codes are generated in-app with ZXing.
 
-**Build & packaging:**
+Design notes:
 
-* Maven project (`pom.xml`); dev run via `mvn javafx:run`.
-* Release: shade into a fat jar (`maven-shade-plugin`), then `jpackage --type deb` (installs to the app menu).
-* README: JDK 17 prerequisite, dev run, build steps, and the **same-WiFi requirement** for both players.
+- **Rematch keeps colors** — seats are bound to their color-specific link so
+  reconnecting always works; the scoreboard (wins/draws) persists across
+  rematches and resets on **New Game** or app exit.
+- **LAN IP pick** — the app advertises the first active, non-loopback,
+  site-local IPv4 it finds. With several active interfaces the first one wins;
+  the chosen address is shown in the toolbar so you can verify it.
+- If the port is taken you get a clear error dialog suggesting `--port=`.
 
-Keep code minimal and readable; isolate the chess engine and add a few unit tests for the tricky rules (castling, en passant, promotion, checkmate).
+## Tests
 
----
+```bash
+mvn test
+```
 
-Same two honest constraints still apply: the **embedded server is mandatory** (that's what lets browsers join), and it's **same-WiFi only** by design. The only real change from before is the laptop is now a neutral referee handing out two color-specific invites instead of playing one side.
+Engine unit tests cover the tricky rules (castling legality, en passant,
+promotion, checkmate, stalemate, pins, draws), plus an integration test that
+drives a real WebSocket session end to end (join, reject taken seat, fool's
+mate, rematch, resign, reconnect).
