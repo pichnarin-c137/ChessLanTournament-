@@ -7,7 +7,7 @@ browsers over LAN. All state in memory. See README.md for user-facing docs.
 
 ```bash
 mvn javafx:run -Djavafx.args="--port=8081"   # dev run — ALWAYS use 8081 (see Gotchas)
-mvn test                                     # 34 tests: engine rules, bot, real-WebSocket integration
+mvn test                                     # 43 tests: engine rules, bot, analysis, config, real-WebSocket integration
 mvn clean package                            # fat jar: target/chess-referee-1.0.0-all.jar
 ./package.sh                                 # .deb via jpackage → chess-referee_1.0.0-1_amd64.deb
 ```
@@ -28,6 +28,19 @@ mvn clean package                            # fat jar: target/chess-referee-1.0
   order (FEN letters, `.` = empty) — this is NOT FEN rank ordering.
 - Moves cross the wire as UCI (`e2e4`, `e7e8q`); history is SAN, generated in `Game`.
 - Clocks are server-owned (`GameRoom`); clients only animate between `state` broadcasts.
+- `GameRoom` async pattern: off-thread work (bot moves on the `BOT` executor, flag falls
+  on `CLOCK`, move grading on `ANALYSIS` — kept separate so searches never delay flag
+  checks) re-verifies phase/ply/generation under the room lock and silently drops stale
+  tasks.
+- `Analysis.analyse` grades a played move (chess.com-style, `brilliant`…`blunder`) with
+  a noiseless depth-3 search; grades ride the `state` JSON as `annotations`, an array
+  parallel to `history` (`null` = still analysing).
+- `setBot()`, like `setTimeControl()`, is called right after `newRoom()` before players
+  join; a bot seat counts as connected and shows in the `bots` field of state JSON.
+- Runtime knobs live in `application.properties` at the repo root (`-Dchess.config=...`
+  to relocate), read via `chess.server.Config`. The file is re-read before every bot
+  move — currently the bot's thinking delay (`bot.move.delay.min.ms`/`max.ms`) — so
+  edits apply live, without a restart.
 
 ## Gotchas
 
@@ -41,3 +54,5 @@ mvn clean package                            # fat jar: target/chess-referee-1.0
   app to see web-client changes.
 - `pom.xml` pins maven-compiler-plugin 3.11.0; removing it breaks the build on
   Maven 3.8.7 ("Source option 5 is no longer supported").
+- A stale editor buffer once silently reverted `HostApp.java` to a pre-merge copy. If a
+  merged feature seems missing at runtime, run `git diff` / `git status` before debugging.

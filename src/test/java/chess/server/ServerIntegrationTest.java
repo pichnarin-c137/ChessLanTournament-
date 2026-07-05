@@ -146,6 +146,12 @@ class ServerIntegrationTest {
         assertEquals("[\"f3\",\"e5\",\"g4\",\"Qh4#\"]", over.path("history").toString());
         assertTrue(over.path("clock").isNull()); // this room is untimed
 
+        // Move grades arrive asynchronously; g4 walked into mate, Qh4# delivered it.
+        JsonNode annotated = white.awaitState(m -> m.path("annotations").size() == 4
+                && !m.path("annotations").get(3).isNull());
+        assertEquals("blunder", annotated.path("annotations").get(2).asText());
+        assertEquals("best", annotated.path("annotations").get(3).asText());
+
         // Rematch needs both votes; the board resets and the score stays.
         white.send("{\"type\":\"rematch\"}");
         JsonNode oneVote = black.awaitState(m -> m.path("rematchVotes").size() == 1);
@@ -155,6 +161,7 @@ class ServerIntegrationTest {
         assertEquals("white", fresh.path("turn").asText());
         assertEquals(1, fresh.path("score").path("black").asInt());
         assertTrue(fresh.path("board").asText().startsWith("RNBQKBNR"));
+        assertEquals(0, fresh.path("annotations").size()); // grades don't survive a rematch
 
         // Resignation ends the new game and scores for the opponent.
         white.send("{\"type\":\"resign\"}");
@@ -191,11 +198,27 @@ class ServerIntegrationTest {
         solo.send("{\"type\":\"move\",\"move\":\"e2e4\"}");
         JsonNode replied = solo.awaitState(m -> m.path("history").size() == 2);
         assertEquals("white", replied.path("turn").asText());
+        solo.awaitState(m -> m.path("annotations").size() == 2 // the bot's move is graded too
+                && !m.path("annotations").get(0).isNull() && !m.path("annotations").get(1).isNull());
         solo.send("{\"type\":\"resign\"}");
         solo.awaitState(m -> "over".equals(m.path("phase").asText()));
         solo.send("{\"type\":\"rematch\"}"); // the bot votes along, one click restarts
         JsonNode again = solo.awaitState(m -> "playing".equals(m.path("phase").asText())
                 && m.path("history").size() == 0);
         assertEquals(1, again.path("score").path("black").asInt());
+
+        // Bot vs bot: no web seats exist, but grades still flow to the host view.
+        BlockingQueue<RoomState> hostStates = new LinkedBlockingQueue<>();
+        room = server.newRoom(hostStates::add);
+        room.setBot(Color.WHITE, Bot.Level.EASY);
+        room.setBot(Color.BLACK, Bot.Level.EASY); // second bot seat starts the game
+        long deadline = System.currentTimeMillis() + 10_000;
+        boolean graded = false;
+        while (!graded && System.currentTimeMillis() < deadline) {
+            RoomState s = hostStates.poll(200, TimeUnit.MILLISECONDS);
+            graded = s != null && !s.annotations().isEmpty() && s.annotations().get(0) != null;
+        }
+        room.close("verification over"); // stop the bots before the next test section
+        assertTrue(graded, "bot-vs-bot game produced no graded move within 10s");
     }
 }

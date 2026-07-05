@@ -26,7 +26,7 @@ public final class Bot {
         }
     }
 
-    private static final int MATE = 100_000;
+    static final int MATE = 100_000;
 
     private Bot() {
     }
@@ -48,8 +48,8 @@ public final class Bot {
     }
 
     /** Score for the side to move in {@code g}, searching {@code depth} more plies. */
-    private static int negamax(Game g, int depth, int alpha, int beta,
-                               int noise, Random rnd, int ply) {
+    static int negamax(Game g, int depth, int alpha, int beta,
+                       int noise, Random rnd, int ply) {
         List<Move> moves = ordered(g);
         if (moves.isEmpty()) return g.inCheck() ? -(MATE - ply) : 0; // mate or stalemate
         if (depth == 0) return evaluate(g, noise, rnd);
@@ -95,7 +95,7 @@ public final class Bot {
         };
     }
 
-    private static int value(PieceType type) {
+    static int value(PieceType type) {
         return switch (type) {
             case PAWN -> 100;
             case KNIGHT -> 320;

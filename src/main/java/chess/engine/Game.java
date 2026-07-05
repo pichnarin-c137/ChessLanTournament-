@@ -214,7 +214,7 @@ public final class Game {
         return s.append(capture ? "x" : "").append(dest).toString();
     }
 
-    // -- rules bookkeeping ---------------------------------------------------
+    //  rules bookkeeping
 
     private void updateCastlingRights(Piece moved, Move m) {
         if (moved.type() == PieceType.KING) {
@@ -277,7 +277,7 @@ public final class Game {
         halfmoveClock = value;
     }
 
-    // -- move generation -----------------------------------------------------
+    //  move generation 
 
     private List<Move> pseudoLegalMoves(Color side) {
         List<Move> out = new ArrayList<>(48);
@@ -388,7 +388,7 @@ public final class Game {
         return p != null && p.color() == color && p.type() == type;
     }
 
-    // -- legality ------------------------------------------------------------
+    //  legality
 
     private boolean leavesKingInCheck(Move m) {
         Piece[] copy = board.clone();

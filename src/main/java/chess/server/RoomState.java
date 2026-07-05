@@ -16,6 +16,7 @@ public record RoomState(
         String lastMove,
         List<String> legalMoves,
         List<String> history,
+        List<String> annotations, // move grades parallel to history; null = still analysing
         String timeControl, // label like "10|5", or null when the game is untimed
         long whiteMillis,
         long blackMillis,

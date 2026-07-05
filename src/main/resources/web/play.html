@@ -62,7 +62,37 @@
     background: #3a3a3a; color: #eee;
   }
   button:active { background: #555; }
-  #rematch { background: #2f6b2f; }
+  #rematch, #goRematch { background: #2f6b2f; }
+  .an { font-weight: 700; }
+  .an.brilliant { color: #26c2a3; }
+  .an.great { color: #5b8bb0; }
+  .an.inaccuracy { color: #e6b23c; }
+  .an.mistake { color: #e07f3c; }
+  .an.blunder { color: #e05555; }
+  .badge {
+    position: absolute; top: -5%; right: -5%; width: 38%; height: 38%; z-index: 2;
+    border-radius: 50%; display: flex; align-items: center; justify-content: center;
+    font-size: calc(var(--bw) / 8 * 0.26); font-weight: 800; color: #fff;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, .5); pointer-events: none;
+  }
+  .badge.brilliant { background: #26c2a3; }
+  .badge.great { background: #5b8bb0; }
+  .badge.inaccuracy { background: #e6b23c; }
+  .badge.mistake { background: #e07f3c; }
+  .badge.blunder { background: #e05555; }
+  #gameover {
+    position: fixed; inset: 0; background: rgba(0, 0, 0, .65); display: none;
+    align-items: center; justify-content: center; z-index: 9; /* under #overlay: reconnect wins */
+  }
+  #gameover.show { display: flex; }
+  #gocard {
+    background: #2c2a28; border-radius: 14px; padding: 24px 28px; text-align: center;
+    max-width: 320px; display: flex; flex-direction: column; gap: 10px;
+  }
+  #gotitle { font-size: 24px; font-weight: 800; }
+  #gosub { color: #aaa; font-size: 14px; }
+  #goscore { font-size: 14px; }
+  #gostats { font-size: 13px; color: #c9c4bd; line-height: 1.6; }
   #overlay {
     position: fixed; inset: 0; background: rgba(0, 0, 0, .75); display: none;
     flex-direction: column; align-items: center; justify-content: center;
@@ -109,6 +139,15 @@
     <button data-p="b"></button><button data-p="n"></button>
   </div>
 </div>
+<div id="gameover">
+  <div id="gocard">
+    <div id="gotitle"></div>
+    <div id="gosub"></div>
+    <div id="goscore"></div>
+    <div id="gostats"></div>
+    <span><button id="goRematch">Rematch</button> <button id="goClose">Close</button></span>
+  </div>
+</div>
 <div id="toast"></div>
 
 <script>
@@ -118,8 +157,10 @@ const [, , gameId, myColor] = location.pathname.split("/");
 const GLYPHS = { k: "♚", q: "♛", r: "♜", b: "♝", n: "♞", p: "♟" };
 const TEXT = "\uFE0E"; // force text (non-emoji) presentation
 const $ = id => document.getElementById(id);
+const ANNO = { brilliant: "!!", great: "!", inaccuracy: "?!", mistake: "?", blunder: "??" };
 
 let ws = null, st = null, sel = null, fatal = false, pendingPromo = null;
+let resultShown = false; // the winner modal pops once per game; Close keeps it away
 let clock = null; // {white, black, running, at} — ticked locally, resynced by every state msg
 
 // board cells, built once in display order (flipped for black)
@@ -166,6 +207,7 @@ function render() {
   if (fatal || !st) return;
   const lastFrom = st.lastMove ? sqOf(st.lastMove.slice(0, 2)) : -1;
   const lastTo = st.lastMove ? sqOf(st.lastMove.slice(2, 4)) : -1;
+  const lastAnno = st.annotations ? st.annotations[st.history.length - 1] : null;
   for (let sq = 0; sq < 64; sq++) {
     const cell = cells[sq];
     cell.className = "sq " + ((((sq >> 3) + (sq & 7)) % 2) ? "light" : "dark");
@@ -174,6 +216,9 @@ function render() {
     const ch = st.board[sq];
     cell.innerHTML = ch === "." ? "" :
       `<span class="piece ${ch === ch.toUpperCase() ? "w" : "b"}">${GLYPHS[ch.toLowerCase()] + TEXT}</span>`;
+    if (sq === lastTo && ANNO[lastAnno]) {
+      cell.innerHTML += `<span class="badge ${lastAnno}">${ANNO[lastAnno]}</span>`;
+    }
   }
   if (sel !== null) {
     for (const m of st.legalMoves) {
@@ -200,14 +245,22 @@ function render() {
     const votes = st.rematchVotes.length;
     $("rematch").textContent = st.rematchVotes.includes(myColor)
       ? `Rematch — waiting (${votes}/2)` : `Rematch${votes ? " (1/2)" : ""}`;
+    if (!resultShown) { resultShown = true; $("gameover").className = "show"; }
+    $("gotitle").textContent = st.winner ? cap(st.winner) + " wins" : "Draw";
+    $("gosub").textContent = st.result || "";
+    $("goscore").textContent = `White ${st.score.white} · Draws ${st.score.draws} · Black ${st.score.black}`;
+    $("gostats").innerHTML = statsHtml("White", 0) + "<br>" + statsHtml("Black", 1);
+  } else {
+    resultShown = false;
+    $("gameover").className = "";
   }
 
   const parts = [];
   for (let i = 0; i < st.history.length; i += 2) {
-    parts.push((i / 2 + 1) + ". " + st.history[i]
-      + (st.history[i + 1] ? " " + st.history[i + 1] : ""));
+    parts.push((i / 2 + 1) + ". " + sanHtml(i)
+      + (st.history[i + 1] ? " " + sanHtml(i + 1) : ""));
   }
-  $("moves").textContent = parts.join("  ");
+  $("moves").innerHTML = parts.join("  "); // SAN is plain ASCII, safe to inject
   $("moves").scrollLeft = $("moves").scrollWidth;
 
   const mine = st.phase === "playing" && st.turn === myColor;
@@ -218,7 +271,25 @@ function render() {
       + (st.check ? (st.turn === myColor ? " — you are in check!" : " — check!") : ""));
   } else setStatus(st.result || "Game over");
 
-  if (!pendingPromo) overlayOff();
+  // A game ending mid-promotion (flag fall) must not strand the promo picker.
+  if (st.phase !== "playing" || !pendingPromo) overlayOff();
+}
+
+// a move's SAN plus its grade glyph, when notable
+function sanHtml(i) {
+  const a = st.annotations ? st.annotations[i] : null;
+  return st.history[i] + (ANNO[a] ? `<span class="an ${a}">${ANNO[a]}</span>` : "");
+}
+
+// one side's notable-move counts for the winner modal, e.g. "White: 1!! · 2??"
+function statsHtml(label, parity) {
+  const counts = {};
+  (st.annotations || []).forEach((a, i) => {
+    if (i % 2 === parity && ANNO[a]) counts[a] = (counts[a] || 0) + 1;
+  });
+  const bits = Object.keys(ANNO).filter(a => counts[a])
+    .map(a => `${counts[a]}<span class="an ${a}">${ANNO[a]}</span>`);
+  return label + ": " + (bits.length ? bits.join(" · ") : "no remarks");
 }
 
 function setStatus(text) { $("status").textContent = text; }
@@ -289,6 +360,11 @@ $("resign").addEventListener("click", () => {
   if (confirm("Resign this game?")) send({ type: "resign" });
 });
 $("rematch").addEventListener("click", () => send({ type: "rematch" }));
+$("goRematch").addEventListener("click", () => {
+  send({ type: "rematch" }); // the footer button keeps showing the vote count
+  $("gameover").className = "";
+});
+$("goClose").addEventListener("click", () => { $("gameover").className = ""; });
 
 // helpers
 function alg(sq) { return "abcdefgh"[sq & 7] + ((sq >> 3) + 1); }

@@ -1,5 +1,6 @@
 package chess.server;
 
+import chess.engine.Analysis;
 import chess.engine.Bot;
 import chess.engine.Color;
 import chess.engine.Game;
@@ -11,12 +12,14 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.javalin.websocket.WsContext;
 
+import java.util.ArrayList;
 import java.util.EnumMap;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
 import java.util.Set;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
@@ -54,6 +57,14 @@ public final class GameRoom {
                 return t;
             });
 
+    /** Grades played moves for all rooms; never delays bot searches or flag checks. */
+    private static final ExecutorService ANALYSIS =
+            Executors.newSingleThreadExecutor(r -> {
+                Thread t = new Thread(r, "chess-analysis");
+                t.setDaemon(true);
+                return t;
+            });
+
     private final String id;
     private final Consumer<RoomState> hostListener;
 
@@ -67,6 +78,8 @@ public final class GameRoom {
     private int whiteWins, blackWins, draws;
     private Color winner;
     private String result;
+    private final List<String> annotations = new ArrayList<>(); // parallel to history; null = pending
+    private int gameGeneration; // bumped when `game` is replaced, so stale analyses are dropped
 
     private TimeControl nextTimeControl = TimeControl.NONE; // referee's pick, applied at game start
     private TimeControl timeControl = TimeControl.NONE;     // active for the current game
@@ -158,12 +171,16 @@ public final class GameRoom {
             sendError(ctx, "Not your turn.");
             return;
         }
+        Game before = game.copy();
+        Move move;
         try {
-            game.makeMove(Move.fromUci(uci));
+            move = Move.fromUci(uci);
+            game.makeMove(move);
         } catch (Exception e) {
             sendError(ctx, "Illegal move.");
             return;
         }
+        scheduleAnalysis(before, move);
         afterMove(color);
     }
 
@@ -209,6 +226,8 @@ public final class GameRoom {
         rematchVotes.addAll(bots.keySet()); // the computer is always up for another
         if (rematchVotes.size() == 2) {
             game = new Game();
+            annotations.clear();
+            gameGeneration++;
             winner = null;
             result = null;
             rematchVotes.clear();
@@ -220,7 +239,7 @@ public final class GameRoom {
         maybeScheduleBot();
     }
 
-    // -- the built-in bot --------------------------------------------------------
+    //  the built-in bot 
 
     /** If it is a bot's turn, search on the shared bot thread and then move. */
     private void maybeScheduleBot() {
@@ -228,7 +247,9 @@ public final class GameRoom {
         if (phase != Phase.PLAYING || level == null) return;
         Game position = game.copy();
         int ply = game.moveHistory().size();
-        long delay = 400 + rnd.nextInt(400); // a beat of "thinking" feels natural
+        int minDelay = Config.botDelayMinMs(); // a beat of "thinking" feels natural;
+        int maxDelay = Math.max(minDelay, Config.botDelayMaxMs()); // range is user-tunable
+        long delay = minDelay + rnd.nextInt(maxDelay - minDelay + 1);
         BOT.schedule(() -> {
             try {
                 applyBotMove(Bot.choose(position, level, rnd), ply);
@@ -245,11 +266,37 @@ public final class GameRoom {
             return; // resignation, flag fall or a new game while the bot was thinking
         }
         Color mover = game.turn();
+        Game before = game.copy();
         game.makeMove(move);
+        scheduleAnalysis(before, move);
         afterMove(mover);
     }
 
-    // -- clocks ------------------------------------------------------------------
+    //  move analysis
+
+    /** Grades the move just applied, off-thread; the caller holds the room lock. */
+    private void scheduleAnalysis(Game before, Move move) {
+        annotations.add(null); // keeps the arrays aligned while the grade is pending
+        int index = game.moveHistory().size() - 1;
+        int gen = gameGeneration;
+        ANALYSIS.execute(() -> {
+            try {
+                Analysis.MoveAnalysis a = Analysis.analyse(before, move); // slow part, no lock
+                applyAnnotation(index, gen, a.judgment().name().toLowerCase());
+            } catch (Exception e) {
+                e.printStackTrace(); // a queued task would otherwise fail silently
+            }
+        });
+    }
+
+    /** Stores a grade computed off-thread, unless the game was replaced meanwhile. */
+    private synchronized void applyAnnotation(int index, int gen, String judgment) {
+        if (gen != gameGeneration || index >= annotations.size()) return; // rematch or new game
+        annotations.set(index, judgment);
+        broadcast(); // deliberately also fires in phase OVER: late grades still show
+    }
+
+    //  clocks
 
     /** Applies the referee's time control and refills both clocks. */
     private void resetClocks() {
@@ -345,6 +392,7 @@ public final class GameRoom {
     public synchronized void close(String message) {
         cancelFlagCheck();
         phase = Phase.OVER; // a queued flag-fall must not fire for a discarded room
+        gameGeneration++;   // and a queued analysis must not broadcast for it either
         for (WsContext ctx : seats.values()) {
             send(ctx, rejectedJson(message));
             try {
@@ -366,6 +414,7 @@ public final class GameRoom {
                 game.lastMove() == null ? null : game.lastMove().uci(),
                 phase == Phase.PLAYING ? game.legalMovesUci() : List.of(),
                 game.moveHistory(),
+                new ArrayList<>(annotations), // not List.copyOf: pending entries are null
                 timeControl.timed() ? timeControl.label() : null,
                 remainingMillis(Color.WHITE),
                 remainingMillis(Color.BLACK),
@@ -392,7 +441,7 @@ public final class GameRoom {
         hostListener.accept(state);
     }
 
-    // -- JSON ------------------------------------------------------------------
+    //  JSON
 
     private static String stateJson(RoomState s, Color you) {
         ObjectNode n = JSON.createObjectNode();
@@ -409,6 +458,9 @@ public final class GameRoom {
         s.legalMoves().forEach(moves::add);
         ArrayNode history = n.putArray("history");
         s.history().forEach(history::add);
+        ArrayNode annotations = n.putArray("annotations");
+        s.annotations().forEach(annotations::add); // add(null) writes a JSON null
+
         if (s.timeControl() == null) {
             n.putNull("clock");
         } else {

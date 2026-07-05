@@ -203,19 +203,31 @@ public class HostApp extends Application {
         rematchLabel.setText(s.phase() == GameRoom.Phase.OVER
                 ? "Rematch votes: " + s.rematchVotes().size() + "/2"
                 : "");
-        movesView.getItems().setAll(numberedRows(s.history()));
+        movesView.getItems().setAll(numberedRows(s.history(), s.annotations()));
         if (!movesView.getItems().isEmpty()) movesView.scrollTo(movesView.getItems().size() - 1);
         updateClocks();
     }
 
-    /** ["e4","e5","Nf3"] → ["1. e4 e5", "2. Nf3"]. */
-    private static List<String> numberedRows(List<String> history) {
+    /** ["e4","e5","Nf3"] → ["1. e4 e5", "2. Nf3"], with grade glyphs like "g4??" appended. */
+    private static List<String> numberedRows(List<String> history, List<String> annotations) {
         List<String> rows = new ArrayList<>();
         for (int i = 0; i < history.size(); i += 2) {
-            rows.add((i / 2 + 1) + ". " + history.get(i)
-                    + (i + 1 < history.size() ? "  " + history.get(i + 1) : ""));
+            rows.add((i / 2 + 1) + ". " + history.get(i) + glyph(annotations, i)
+                    + (i + 1 < history.size() ? "  " + history.get(i + 1) + glyph(annotations, i + 1) : ""));
         }
         return rows;
+    }
+
+    private static String glyph(List<String> annotations, int i) {
+        if (annotations == null || i >= annotations.size() || annotations.get(i) == null) return "";
+        return switch (annotations.get(i)) {
+            case "brilliant" -> "!!";
+            case "great" -> "!";
+            case "inaccuracy" -> "?!";
+            case "mistake" -> "?";
+            case "blunder" -> "??";
+            default -> "";
+        };
     }
 
     /** Repaints both clock labels from the last snapshot, ticking the running side locally. */
